@@ -7,9 +7,10 @@
 sbsm(
   y,
   x = NULL,
-  x_test = NULL,
+  x_test = x,
   psi = NULL,
   laplace_approx = TRUE,
+  fixedX = (length(y) >= 500),
   approx_g = FALSE,
   nsave = 1000,
   ngrid = 100,
@@ -29,6 +30,9 @@ sample this parameter}
 \item{laplace_approx}{logical; if TRUE, use a normal approximation
 to the posterior in the definition of the transformation;
 otherwise the prior is used}
+
+\item{fixedX}{logical; if TRUE, treat the design as fixed (non-random) when sampling
+the transformation; otherwise treat covariates as random with an unknown distribution}
 
 \item{approx_g}{logical; if TRUE, apply large-sample
 approximation for the transformation}
@@ -56,42 +60,44 @@ as well as the arguments passed in.
 }
 \description{
 Monte Carlo sampling for Bayesian spline regression with an
-unknown (nonparametric) transformation.
+unknown (nonparametric) transformation. Cubic B-splines are
+used with a prior that penalizes roughness.
 }
 \details{
 This function provides fully Bayesian inference for a
 transformed spline regression model using Monte Carlo (not MCMC) sampling.
 The transformation is modeled as unknown and learned jointly
-with the regression function (unless \code{approx_g} = TRUE, which then uses
+with the regression function (unless \code{approx_g = TRUE}, which then uses
 a point approximation). This model applies for real-valued data, positive data, and
 compactly-supported data (the support is automatically deduced from the observed \code{y} values).
 The results are typically unchanged whether \code{laplace_approx} is TRUE/FALSE;
 setting it to TRUE may reduce sensitivity to the prior, while setting it to FALSE
-may speed up computations for very large datasets.
+may speed up computations for very large datasets. By default, \code{fixedX} is
+set to FALSE for smaller datasets (\code{n < 500}) and TRUE for larger datasets (\code{n >= 500}).
 }
 \examples{
 \donttest{
 # Simulate some data:
-n = 100 # sample size
+n = 200 # sample size
 x = sort(runif(n)) # observation points
 
 # Transform a noisy, periodic function:
 y = g_inv_bc(
-  sin(2*pi*x) + sin(4*pi*x) + rnorm(n, sd = .5),
+  sin(2*pi*x) + sin(4*pi*x) + rnorm(n),
              lambda = .5) # Signed square-root transformation
 
 # Fit the semiparametric Bayesian spline model:
 fit = sbsm(y = y, x = x)
 names(fit) # what is returned
 
-# Note: this is Monte Carlo sampling, so no need for MCMC diagnostics!
+# Note: this is Monte Carlo sampling...no need for MCMC diagnostics!
 
 # Plot the model predictions (point and interval estimates):
 pi_y = t(apply(fit$post_ypred, 2, quantile, c(0.05, .95))) # 90\% PI
 plot(x, y, type='n', ylim = range(pi_y,y),
      xlab = 'x', ylab = 'y', main = paste('Fitted values and prediction intervals'))
 polygon(c(x, rev(x)),c(pi_y[,2], rev(pi_y[,1])),col='gray', border=NA)
-lines(x, y, type='p')
-lines(x, fitted(fit), lwd = 3)
+lines(x, y, type='p') # observed points
+lines(x, fitted(fit), lwd = 3) # fitted curve
 }
 }

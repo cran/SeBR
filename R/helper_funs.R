@@ -3,9 +3,10 @@
 #'
 #' Generate training data (X, y) and testing data (X_test, y_test)
 #' for a transformed linear model. The covariates are correlated
-#' Gaussian variables. Half of the true regression coefficients
-#' are zero and the other half are one. There are multiple options
-#' for the transformation, which define the support of the data (see below).
+#' Gaussian variables. A user-specified proportion (\code{prop_sig})
+#' of the regression coefficients are nonozero (= 1) and the rest are zero.
+#' There are multiple options for the transformation, which define the support
+#' of the data (see below).
 #'
 #' @param n number of observations in the training data
 #' @param p number of covariates
@@ -14,6 +15,7 @@
 #' @param n_test number of observations in the testing data
 #' @param heterosked logical; if TRUE, simulate the latent data with heteroskedasticity
 #' @param lambda Box-Cox parameter (only applies for \code{g_type = 'box-cox'})
+#' @param prop_sig proportion of signals (nonzero coefficients)
 #' @return a list with the following elements:
 #' \itemize{
 #' \item \code{y}: the response variable in the training data
@@ -33,6 +35,13 @@
 #' which generates real-valued data with examples including identity,
 #' square-root, and log transformations.
 #'
+#' @note The design matrices \code{X} and \code{X_test}
+#' do not include an intercept and there is no
+#' intercept parameter in \code{beta_true}. The
+#' location/scale of the data are not identified
+#' in general transformed regression models, so
+#' recovering them is not a goal.
+#'
 #' @examples
 #' # Simulate data:
 #' dat = simulate_tlm(n = 100, p = 5, g_type = 'beta')
@@ -45,7 +54,8 @@ simulate_tlm = function(n, p,
                         g_type = 'beta',
                         n_test = 1000,
                         heterosked = FALSE,
-                        lambda = 1){
+                        lambda = 1,
+                        prop_sig = 0.5){
   #----------------------------------------------------------------------------
   # Checks:
   if(!is.element(g_type, c("beta", "step", "box-cox")))
@@ -56,20 +66,18 @@ simulate_tlm = function(n, p,
   #----------------------------------------------------------------------------
   # Simulate a design matrix with correlated predictors:
   ar1 = 0.75
-  X = cbind(1,
-            t(apply(matrix(0, nrow = n, ncol = p), 1, function(x)
-              arima.sim(n = p, list(ar = ar1), sd = sqrt(1-ar1^2)))))
+  X = t(apply(matrix(0, nrow = n, ncol = p), 1, function(x)
+              arima.sim(n = p, list(ar = ar1), sd = sqrt(1-ar1^2))))
 
   # Shuffle the columns:
   ind_shuff = sample(1:p)
-  X[,-1] = X[,-1][,ind_shuff]
+  X = X[,ind_shuff]
 
   # Covariates on the testing data:
-  X_test = cbind(1,
-                 t(apply(matrix(0, nrow = n_test, ncol = p), 1, function(x)
-                   arima.sim(n = p, list(ar = ar1), sd = sqrt(1-ar1^2)))))
+  X_test = t(apply(matrix(0, nrow = n_test, ncol = p), 1, function(x)
+                   arima.sim(n = p, list(ar = ar1), sd = sqrt(1-ar1^2))))
   # Match the column shuffling:
-  X_test[,-1] = X_test[,-1][,ind_shuff]
+  X_test = X_test[,ind_shuff]
   #----------------------------------------------------------------------------
   # True transformation:
   if(g_type =='beta'){
@@ -90,9 +98,8 @@ simulate_tlm = function(n, p,
   }
 
   # True coefficients:
-  beta_true = c(0, # intercept is not needed
-                rep(1, ceiling(p/2)),
-                rep(0, floor(p/2)))
+  beta_true = c(rep(1, ceiling(p*prop_sig)),
+                rep(0, p - ceiling(p*prop_sig)))
   #----------------------------------------------------------------------------
   # Simulate the training and testing observations:
 
@@ -115,6 +122,409 @@ simulate_tlm = function(n, p,
     beta_true = beta_true,
     g_true = z
   ))
+}
+#' Bayesian bootstrap posterior sampler for the CDF
+#'
+#' Compute one Monte Carlo draw from the Bayesian bootstrap (BB)
+#' posterior distribution of the cumulative distribution function (CDF).
+#'
+#' @param y the data from which to infer the CDF (preferably sorted)
+#' @return a function that can evaluate the sampled CDF at any argument(s)
+#'
+#' @details Assuming the data \code{y} are iid from an unknown distribution,
+#' the Bayesian bootstrap (BB) is a nonparametric model for this distribution. The
+#' BB is a limiting case of a Dirichlet process prior (without
+#' any hyperparameters) that admits direct Monte Carlo (not MCMC) sampling.
+#'
+#' This function computes one draw from the BB posterior
+#' distribution for the CDF \code{Fy}.
+#'
+#' @note This code is inspired by \code{ggdist::weighted_ecdf}.
+#'
+#' @examples
+#' # Simulate data:
+#' y = rnorm(n = 100)
+#'
+#' # One draw from the BB posterior:
+#' Fy = bb(y)
+#'
+#' class(Fy) # this is a function
+#' Fy(0) # some example use (for this one draw)
+#' Fy(c(.5, 1.2))
+#'
+#' # Plot several draws from the BB posterior distribution:
+#' ys = seq(-3, 3, length.out=1000)
+#' plot(ys, ys, type='n', ylim = c(0,1),
+#'      main = 'Draws from BB posterior', xlab = 'y', ylab = 'F(y)')
+#' for(s in 1:50) lines(ys, bb(y)(ys), col='gray')
+#'
+#' # Add ECDF for reference:
+#' lines(ys, ecdf(y)(ys), lty=2)
+#'
+#' @importFrom stats rgamma approxfun
+#' @export
+bb = function(y){
+
+  # Length of data:
+  n = length(y)
+
+  # Sort the y's, if unsorted
+  if(is.unsorted(y)) y = y[order(y)]
+
+  # Dirichlet(1) weights:
+  weights_y = rgamma(n = n, shape = 1)
+  weights_y  = weights_y/sum(weights_y)
+
+  # Key input (with rescaling by n/(n+1) as in the paper for boundary reasons)
+  sum_weights_y = n/(n+1)*cumsum(weights_y)
+
+  # Use approxfun() for fast computing (w/ n/(n+1) rescaling as above)
+  Fy = approxfun(y, sum_weights_y,
+                 yleft = 0, yright = n/(n+1),
+                 ties = "ordered",
+                 method = "constant")
+  return(Fy)
+}
+#' Hierarchical Bayesian bootstrap posterior sampler
+#'
+#' Compute one Monte Carlo draw from the hierarchical Bayesian bootstrap (HBB)
+#' posterior distribution of the cumulative distribution function (CDF) for
+#' each group. The common (BB) and group-specific (HBB) weights are also returned.
+#'
+#' @param y the data from which to infer the group-specific CDFs
+#' @param groups the group assignment for each element of \code{y}
+#' @param sample_alphas logical; if TRUE, sample the concentration hyperparameters
+#' from their marginal posterior distribution
+#' @param shape_alphas (optional) shape parameter for the Gamma prior on each \code{alphas} (if sampled)
+#' @param rate_alphas (optional) rate parameter for the Gamma prior on each \code{alphas} (if sampled)
+#' @param alphas (optional) vector of fixed concentration hyperparameters corresponding
+#' to the unique levels in \code{groups} (used when \code{sample_alphas = FALSE})
+#' @param M a positive scaling term to set a default value of \code{alphas} when
+#' it is unspecified (\code{alphas = NULL}) and not sampled (\code{sample_alphas = FALSE})
+#'
+#' @return a list with the following elements:
+#' \itemize{
+#'  \item \code{Fyc}: a list of functions where each entry corresponds to a group
+#'  and that group-specific function can evaluate the sampled CDF at any argument(s)
+#'  \item \code{weights_y}: sampled weights from the common (BB) distribution (\code{n}-dimensional)
+#'  \item \code{weights_yc}: sampled weights from each of the \code{K} groups (\code{K x n})
+#'  \item \code{alphas}: the (fixed or sampled) concentration hyperparameters
+#' }
+#'
+#' @details Assuming the data \code{y} are independent with unknown,
+#' group-specific distributions, the hierarchical Bayesian bootstrap (HBB) from
+#' Oganisian et al. (<https://doi.org/10.1515/ijb-2022-0051>) is a nonparametric model
+#' for each distribution. The HBB includes hierarchical shrinkage across these
+#' groups toward a common distribution (the \code{\link{bb}}). The HBB admits
+#' direct Monte Carlo (not MCMC) sampling.
+#'
+#' The shrinkage toward this common distribution is determined by the concentration
+#' hyperparameters \code{alphas}. Each component of \code{alphas} corresponds to
+#' one of the groups. Larger values encourage more shrinkage toward
+#' the common distribution, while smaller values allow more substantial deviations for that group.
+#'
+#' When \code{sample_alphas=TRUE}, each component of \code{alphas} is sampled from its marginal
+#' posterior distribution, assuming independent Gamma(\code{shape_alphas}, \code{rate_alphas})
+#' priors. This step uses a simple grid approximation to enable efficient sampling that
+#' preserves joint Monte Carlo sampling with the group-specific and common distributions.
+#' See \code{\link{concen_hbb}} for details. Note that diffuse priors on \code{alphas}
+#' tends to produce more aggressive shrinkage toward the common distribution (complete pooling).
+#' For moderate shrinkage, we use the default values \code{shape_alphas = 30*K} and \code{rate_alphas = 1}
+#' where \code{K} is the number of groups.
+#'
+#' When \code{sample_alphas=FALSE}, these concentration hyperparameters are fixed
+#' at user-specified values. That can be done by specifying \code{alphas} directly.
+#' Alternatively, if \code{alphas} is left unspecified (\code{alphas = NULL}),
+#' we adopt the default from Oganisian et al. which sets the \code{c}th entry to \code{M*n/nc}
+#' where \code{M} is user-specified and \code{nc} is the number of observations in group \code{c}.
+#' For further guidance on the choice of \code{M}:
+#' \itemize{
+#' \item \code{M = 0.01/K} approximates separate BB's by group (no pooling);
+#' \item \code{M} between 10 and 100 gives moderate shrinkage (partial pooling); and
+#' \item \code{M = 100*max(nc)} approximates a common BB (complete pooling).
+#' }
+#'
+#' @note If supplying \code{alphas} with distinct entries, make sure that the
+#' groups are ordered properly; these entries should match \code{sort(unique(groups))}.
+#'
+#' @references Oganisian et al. (<https://doi.org/10.1515/ijb-2022-0051>)
+#'
+#' @examples
+#' # Sample size and number of groups:
+#' n = 500
+#' K = 3
+#'
+#' # Define the groups, then assign:
+#' ugroups = paste('g', 1:K, sep='') # groups
+#' groups = sample(ugroups, n, replace = TRUE) # assignments
+#'
+#' # Simulate the data: iid normal, then add group-specific features
+#' y = rnorm(n = n) # data
+#' for(g in ugroups)
+#'   y[groups==g] = y[groups==g] + 3*rnorm(1) # group-specific
+#'
+#' # One draw from the HBB posterior of the CDF:
+#' samp_hbb = hbb(y, groups)
+#'
+#' names(samp_hbb) # items returned
+#' Fyc = samp_hbb$Fyc # list of CDFs
+#' class(Fyc) # this is a list
+#' class(Fyc[[1]]) # each element is a function
+#'
+#' c = 1 # try: vary in 1:K
+#' Fyc[[c]](0) # some example use (for this one draw)
+#' Fyc[[c]](c(.5, 1.2))
+#'
+#' # Plot several draws from the HBB posterior distribution:
+#' ys = seq(min(y), max(y), length.out=1000)
+#' plot(ys, ys, type='n', ylim = c(0,1),
+#'      main = 'Draws from HBB posteriors', xlab = 'y', ylab = 'F_c(y)')
+#' for(s in 1:50){ # some draws
+#'
+#'   # BB CDF:
+#'   Fy = bb(y)
+#'   lines(ys, Fy(ys), lwd=3) # plot CDF
+#'
+#'   # HBB:
+#'   Fyc = hbb(y, groups)$Fyc
+#'
+#'   # Plot CDFs by group:
+#'   for(c in 1:K) lines(ys, Fyc[[c]](ys), col=c+1, lwd=3)
+#' }
+#'
+#' # For reference, add the ECDFs by group:
+#' for(c in 1:K) lines(ys, ecdf(y[groups==ugroups[c]])(ys), lty=2)
+#'
+#' legend('bottomright', c('BB', paste('HBB:', ugroups)), col = 1:(K+1), lwd=3)
+#'
+#' @importFrom stats rgamma approxfun
+#' @export
+hbb = function(y, groups,
+               sample_alphas = FALSE,
+               shape_alphas = NULL,
+               rate_alphas = NULL,
+               alphas = NULL, M = 30){
+
+  #----------------------------------------------------------------------------
+  # Start with checks and basic definitions
+
+  # Length of data:
+  n = length(y)
+
+  # Check: lengths:
+  if(length(groups) != n)
+    stop('y and groups must have the same length')
+
+  # Unique groups (levels) and their number:
+  ugroups = sort(unique(groups))
+  K = length(ugroups)
+
+  # Sort the y's (and groups), if unsorted
+  if(is.unsorted(y)) {
+    ord = order(y)
+    y = y[ord]
+    groups = groups[ord]
+  }
+
+  #----------------------------------------------------------------------------
+  # Step 0: sample or fix the concentration hyperparameters
+  if(sample_alphas){
+
+    # Default values:
+    if(is.null(shape_alphas)) shape_alphas = 30*K
+    if(is.null(rate_alphas)) rate_alphas = 1
+
+    # One draw of alphas:
+    alphas = concen_hbb(groups = groups,
+                           shape_alphas = shape_alphas,
+                           rate_alphas = rate_alphas,
+                           nsave = 1,
+                           ngrid = 500)
+
+  } else {
+
+    # When hyperparameters are unspecified, use the default from Organisian et al:
+    if(is.null(alphas)){
+      nc = table(groups)[ugroups] # number of observations by group
+      alphas = M*n/nc
+    }
+
+    # Check whether the alphas have the right length and
+    if(length(alphas) != K)
+      stop('alphas must have length equal to the number of unique groups')
+  }
+  #----------------------------------------------------------------------------
+  # Step 1: sample the "global" CDF (using BB)
+
+  # Dirichlet(1) weights:
+  weights_y = rgamma(n = n, shape = 1)
+  weights_y  = weights_y/sum(weights_y)
+
+  # Key input (with rescaling by n/(n+1) as in the paper for boundary reasons)
+  sum_weights_y = n/(n+1)*cumsum(weights_y)
+
+  # Use approxfun() for fast computing (w/ n/(n+1) rescaling as above)
+  #   Note: this is never used, so no need to compute it...
+  # Fy0 = approxfun(y, sum_weights_y,
+  #                 yleft = 0, yright = n/(n+1),
+  #                 ties = "ordered",
+  #                 method = "constant")
+  #----------------------------------------------------------------------------
+  # Step 2: sample the group-specific CDFs
+  Fyc = vector('list', K) # list of functions...
+  names(Fyc) = ugroups
+  weights_yc = matrix(NA, nrow = K, ncol = n) # to store the sampled weights
+
+  # For each group:
+  for(c in 1:K){
+
+    # Dirichlet(ac) weights:
+    ac = alphas[c]*weights_y + I(groups==ugroups[c])
+    weights_yc[c,] = rgamma(n = n, shape = ac)
+    weights_yc[c,]  = weights_yc[c,]/sum(weights_yc[c,])
+
+    # Key input (with rescaling by n/(n+1) as in the paper for boundary reasons)
+    sum_weights_yc = n/(n+1)*cumsum(weights_yc[c,])
+
+    # Use approxfun() for fast computing (w/ n/(n+1) rescaling as above)
+    Fyc[[c]] = approxfun(y, sum_weights_yc,
+                         yleft = 0, yright = n/(n+1),
+                         ties = "ordered",
+                         method = "constant")
+  }
+
+  return(list(
+    #Fy0 = Fy0, # not needed
+    Fyc = Fyc,
+    weights_y = weights_y,
+    weights_yc = weights_yc,
+    alphas = alphas
+  ))
+}
+#' Posterior sampling algorithm for the HBB concentration hyperparameters
+#'
+#' Compute Monte Carlo draws from the (marginal) posterior distribution of the
+#' concentration hyperparameters of the hierarchical Bayesian bootstrap
+#' (\code{\link{hbb}}). The HBB is a nonparametric model for group-specific
+#' distributions; each group has a concentration parameter, where
+#' larger values encourage more shrinkage toward a common distribution.
+#'
+#' @param groups the group assignments in the observed data
+#' @param shape_alphas (optional) shape parameter for the Gamma prior
+#' @param rate_alphas (optional) rate parameter for the Gamma prior
+#' @param nsave (optional) number of Monte Carlo simulations
+#' @param ngrid (optional) number of grid points
+#' @return \code{nsave x K} samples of the concentration hyperparameters
+#' corresponding to the \code{K} groups
+#'
+#' @details The concentration hyperparameters are assigned
+#' independent Gamma(\code{shape_alphas}, \code{rate_alphas}) priors.
+#' This function uses a grid approximation to the marginal posterior
+#' with the goal of producing a simple algorithm. Because this is a
+#' *marginal* posterior sampler, it can be used with the \code{\link{hbb}}
+#' sampler (which conditions on \code{alphas}) to provide a joint
+#' Monte Carlo (not MCMC) sampling algorithm for the concentration
+#' hyperparameters, the group-specific CDFs, and the common CDF.
+
+#' Note that diffuse priors on \code{alphas} tend to put posterior mass on
+#' large values, which leads to more aggressive shrinkage toward the common distribution
+#' (complete pooling). For moderate shrinkage, we use the default values
+#' \code{shape_alphas = 30*K} and \code{rate_alphas = 1}, where \code{K} is the
+#' number of groups.
+#'
+#' @references Oganisian et al. (<https://doi.org/10.1515/ijb-2022-0051>)
+#'
+#' @examples
+#' # Dimensions:
+#' n = 500 # number of observations
+#' K = 3 # number of groups
+#'
+#' # Assign groups w/ unequal probabilities:
+#' ugroups = paste('g', 1:K, sep='') # groups
+#' groups = sample(ugroups,
+#'                 size = n,
+#'                 replace = TRUE,
+#'                 prob = 1:K) # unequally weighted (unnormalized)
+#'
+#' # Summarize:
+#' table(groups)/n
+#'
+#' # Marginal posterior sampling for alpha:
+#' post_alpha = concen_hbb(groups)
+#'
+#' # Summarize: posterior distributions
+#' for(c in 1:K) {
+#'   hist(post_alpha[,c],
+#'        main = paste("Concentration parameter: group", ugroups[c]),
+#'        xlim = range(post_alpha))
+#'   abline(v = mean(post_alpha[,c]), lwd=3) # posterior mean
+#' }
+#'
+#' @importFrom stats dgamma
+#' @export
+concen_hbb = function(groups,
+                         shape_alphas = NULL,
+                         rate_alphas = NULL,
+                         nsave = 1000,
+                         ngrid = 500){
+
+  # Unique groups (levels) and their number:
+  ugroups = sort(unique(groups))
+  K = length(ugroups)
+
+  # Number of observations by group:
+  nc = table(groups)[ugroups]
+
+  # Total number of observations:
+  n = length(groups)
+
+  # Default values:
+  if(is.null(shape_alphas)) shape_alphas = 30*K
+  if(is.null(rate_alphas)) rate_alphas = 1
+
+  # Establish a grid
+  #   alpha = 0.01 ~ separate BBs by group
+  #   alpha = 100*n ~ common BB
+  # Use a regular grid for "small" values, then log-grid for "large" values
+  a_grid = c(seq(0.01, 10, length.out = ceiling(ngrid/5)),
+             exp(seq(log(10.01), log(100*n), length.out = ngrid - ceiling(ngrid/5))))
+
+  # Log-likelihood for each group's alpha:
+  #   NOTE: use recurring terms instead to save compute time
+  # loglike_alpha = function(alphac, nc) lgamma(alphac) + nc*log(alphac) - lgamma(alphac + nc)
+
+  # Recurring terms shared for all c = 1:K (and all simulations)
+  lga = lgamma(a_grid)
+  log_prior = dgamma(a_grid,
+                     shape = shape_alphas,
+                     rate = rate_alphas,
+                     log = TRUE)
+
+  # Storage:
+  post_alphas = matrix(NA, nrow = nsave, ncol = K); colnames(post_alphas) = ugroups
+
+  # For each group:
+  for(c in 1:K){
+
+    # Log-posterior (up to a constant) on the grid:
+    log_post = log_prior +
+      lga + nc[c]*log(a_grid) - lgamma(a_grid + nc[c]) # log-likelihood on grid
+
+    # Add a constant to avoid (some) numerical issues:
+    log_post = log_post + abs(max(log_post))
+
+    # Also exclude very low probability grid points:
+    sub_c = which(exp(log_post) > 10^-16)
+    post_alphas[, c] = sample(x = a_grid[sub_c],
+                              size = nsave,
+                              replace = TRUE,
+                              prob = exp(log_post[sub_c]))
+  }
+
+  # For a single draw, convert to a vector
+  if(nsave==1) post_alphas = post_alphas[1,]
+
+  return(post_alphas)
 }
 #----------------------------------------------------------------------------
 #' Plot point and interval predictions on testing data
@@ -223,7 +633,7 @@ g_bc = function(t, lambda) {
 #' the square-root transformation (\code{lambda = 1/2}),
 #' and the log transformation (\code{lambda = 0}).
 #'
-#'#' @examples
+#' @examples
 #' # (Inverse) log-transformation:
 #' g_inv_bc(1:5, lambda = 0); exp(1:5)
 #'
@@ -294,16 +704,19 @@ rank_approx = function(y, X){
   #Sigma_hat = vcov(fit) # is this meaningful?
 }
 #----------------------------------------------------------------------------
-#' Estimate the remaining time in the MCMC based on previous samples
-#' @param nsi Current iteration
-#' @param timer0 Initial timer value, returned from \code{proc.time()[3]}
-#' @param nsims Total number of simulations
-#' @param nrep Print the estimated time remaining every \code{nrep} iterations
-#' @return Table of summary statistics using the function \code{summary}
-computeTimeRemaining = function(nsi, timer0, nsims, nrep=1000){
+#' Estimate the remaining time in the algorithm
+#' @param nsi current iteration
+#' @param timer0 initial timer value from \code{proc.time()[3]}
+#' @param nsims total number of simulations
+#' @param nprints total number of printed updates
+#' @return estimate of remaining time
+computeTimeRemaining = function(nsi, timer0, nsims, nprints = 2){
+
+  # Print every nrep:
+  nrep = ceiling(nsims/(nprints +1)) + 1
 
   # Only print occasionally:
-  if(nsi%%nrep == 0 || nsi==100) {
+  if(nsi%%nrep == 0){ # || nsi==ninit) {
     # Current time:
     timer = proc.time()[3]
 
@@ -315,11 +728,11 @@ computeTimeRemaining = function(nsi, timer0, nsims, nrep=1000){
 
     # Print the results:
     if(secRemaining > 3600) {
-      print(paste(round(secRemaining/3600, 1), "hours remaining"))
+      print(paste(round(secRemaining/3600, 1), "hr remaining"))
     } else {
       if(secRemaining > 60) {
-        print(paste(round(secRemaining/60, 2), "minutes remaining"))
-      } else print(paste(round(secRemaining), "seconds remaining"))
+        print(paste(ceiling(secRemaining/60), "min remaining"))
+      } else print(paste(ceiling(secRemaining), "sec remaining"))
     }
   }
 }

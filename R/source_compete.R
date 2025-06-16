@@ -8,7 +8,7 @@
 #' for the regression coefficients.
 #'
 #' @param y \code{n x 1} vector of observed counts
-#' @param X \code{n x p} matrix of predictors
+#' @param X \code{n x p} matrix of predictors (no intercept)
 #' @param X_test \code{n_test x p} matrix of predictors for test data;
 #' default is the observed covariates \code{X}
 #' @param psi prior variance (g-prior)
@@ -45,6 +45,11 @@
 #' in general we recommend the nonparametric transformation (with
 #' Monte Carlo, not MCMC sampling) in \code{\link{sblm}}.
 #'
+#' @note An intercept is automatically added to \code{X} and
+#' \code{X_test}. The coefficients reported do *not* include
+#' this intercept parameter, since it is not identified
+#' under more general transformation models (e.g., \code{\link{sblm}}).
+#'
 #' @examples
 #' # Simulate some data:
 #' dat = simulate_tlm(n = 100, p = 5, g_type = 'step')
@@ -71,16 +76,27 @@ blm_bc = function(y, X, X_test = X,
   # For testing:
   # X_test = X; psi = length(y); sample_lambda  = FALSE; lambda = NULL; nsave = 1000; nburn = 1000; nskip = 0; verbose = TRUE
 
+  # Initial checks:
+  if(!is.matrix(X)) stop("X must be a matrix (rows = observations, columns = variables)")
+  if(!is.matrix(X_test)) stop("X_test must be a matrix (rows = observations, columns = variables)")
+  if(ncol(X) != ncol(X_test)) stop('X_test and X must have the same number of columns (variables)')
+  if(nrow(X) != length(y)) stop('the length of y must equal nrow(X)')
+
+  # Here: intercept is 1st column of X, X_test
+  #   (this is not part of the target parameter theta)
+  is_intercept = apply(X, 2, function(x) all(x == 1))
+  X = cbind(1, X[,!is_intercept])
+  is_intercept_test = apply(X_test, 2, function(x) all(x == 1))
+  X_test = cbind(1, X_test[,!is_intercept_test])
+
   # Data dimensions:
-  n = length(y); p = ncol(X)
+  n = length(y) # number of observations
+  p = ncol(X) - 1 # number of variables (excluding intercept)
+  n_test = nrow(X_test) # number of testing data points
 
-  # Testing data points:
-  if(!is.matrix(X_test)) X_test = matrix(X_test, nrow  = 1)
-
-  # And some checks on columns:
+  # Requirement for the g-prior:
   if(p >= n) stop('The g-prior requires p < n')
-  if(p != ncol(X_test)) stop('X_test and X must have the same number of columns')
-
+  #----------------------------------------------------------------------------
   # Recurring terms:
   y0 = sort(unique(y))
   XtX = crossprod(X)
@@ -129,7 +145,7 @@ blm_bc = function(y, X, X_test = X,
   #----------------------------------------------------------------------------
   # Store MCMC output:
   post_theta = array(NA, c(nsave, p))
-  post_ypred = array(NA, c(nsave, nrow(X_test)))
+  post_ypred = array(NA, c(nsave, n_test))
   post_g = array(NA, c(nsave, length(y0)))
   post_lambda = post_sigma = rep(NA, nsave)
 
@@ -163,7 +179,7 @@ blm_bc = function(y, X, X_test = X,
     }
     #----------------------------------------------------------------------------
     # Block 2: sample the error SD
-    SSR_psi = sum(z^2) - psi/(psi+1)*crossprod(z, X%*%XtXinv%*%crossprod(X, z))
+    SSR_psi = sum(z^2) - psi/(psi+1)*crossprod(Xtz, XtXinv%*%Xtz)
     sigma_epsilon = 1/sqrt(rgamma(n = 1,
                                   shape = .001 + n/2,
                                   rate = .001 + SSR_psi/2))
@@ -173,7 +189,7 @@ blm_bc = function(y, X, X_test = X,
     ell_theta = 1/sigma_epsilon^2*Xtz
     theta = backsolve(ch_Q,
                       forwardsolve(t(ch_Q), ell_theta) +
-                        rnorm(p))
+                        rnorm(p+1))
     #----------------------------------------------------------------------------
     # Store the MCMC:
     if(nsi > nburn){
@@ -187,10 +203,10 @@ blm_bc = function(y, X, X_test = X,
         isave = isave + 1
 
         # Posterior samples of the model parameters:
-        post_theta[isave,] = theta
+        post_theta[isave,] = theta[-1]
 
         # Predictive samples of ytilde:
-        ztilde = X_test%*%theta + sigma_epsilon*rnorm(n = nrow(X_test))
+        ztilde = X_test%*%theta + sigma_epsilon*rnorm(n = n_test)
         post_ypred[isave,] = g_inv_bc(ztilde, lambda = lambda)
 
         # Posterior samples of the transformation:
@@ -204,9 +220,15 @@ blm_bc = function(y, X, X_test = X,
         skipcount = 0
       }
     }
-    if(verbose) computeTimeRemaining(nsi, timer0, nstot, nrep = 5000)
+    if(verbose) computeTimeRemaining(nsi, timer0, nstot)
   }
-  if(verbose) print(paste('Total time: ', round((proc.time()[3] - timer0)), 'seconds'))
+  # Summarize computing time:
+  if(verbose){
+    tfinal = proc.time()[3] - timer0
+    if(tfinal > 60){
+      print(paste('Total time:', round(tfinal/60,1), 'minutes'))
+    } else print(paste('Total time:', round(tfinal), 'seconds'))
+  }
 
   return(list(
     coefficients = colMeans(post_theta),
@@ -214,7 +236,7 @@ blm_bc = function(y, X, X_test = X,
     post_theta = post_theta,
     post_ypred = post_ypred,
     post_g = post_g, post_lambda = post_lambda, post_sigma = post_sigma,
-    model = 'blm_bc', y = y, X = X, X_test = X_test, psi = psi))
+    model = 'blm_bc', y = y, X = X[,-1], X_test = X_test[,-1], psi = psi))
 }
 #' Bayesian spline model with a Box-Cox transformation
 #'
@@ -281,10 +303,10 @@ blm_bc = function(y, X, X_test = X,
 #' lines(x, y, type='p')
 #' lines(x, fitted(fit), lwd = 3)
 #'
-#' @importFrom spikeSlabGAM sm
+# #' @importFrom spikeSlabGAM sm
 #' @export
 bsm_bc = function(y, x = NULL,
-                   x_test = NULL,
+                   x_test = x,
                    psi = NULL,
                    lambda = NULL,
                    sample_lambda = TRUE,
@@ -296,19 +318,29 @@ bsm_bc = function(y, x = NULL,
   # For testing:
   # psi = length(y); sample_lambda  = FALSE; lambda = NULL; nsave = 1000; nburn = 1000; nskip = 0; verbose = TRUE
 
+  # Library required here:
+  if (!requireNamespace("spikeSlabGAM", quietly = TRUE)) {
+    stop(
+      "Package \"spikeSlabGAM\" must be installed to use this function.",
+      call. = FALSE
+    )
+  }
+
   # Data dimensions:
   n = length(y)
 
   # Observation points:
   if(is.null(x)) x = seq(0, 1, length=n)
-  if(is.null(x_test)) x_test = x
+
+  # Initial checks:
+  if(length(x) != n) stop('x and y must have the same number of observations')
 
   # Recale to [0,1]:
   x = (x - min(x))/(max(x) - min(x))
   x_test = (x_test - min(x_test))/(max(x_test) - min(x_test))
   #----------------------------------------------------------------------------
   # Orthogonalized P-spline and related quantities:
-  X = cbind(1/sqrt(n), poly(x, 1), sm(x))
+  X = cbind(1/sqrt(n), poly(x, 1), spikeSlabGAM::sm(x))
   X = X/sqrt(sum(diag(crossprod(X))))
   diagXtX = colSums(X^2)
   p = length(diagXtX)
@@ -397,10 +429,11 @@ bsm_bc = function(y, x = NULL,
     }
     # Block 2: sample the scale adjustment (SD)
     # SSR_psi = sum(z^2) - crossprod(z, X%*%solve(crossprod(X) + diag(1/psi, p))%*%crossprod(X,z))
-    SSR_psi = sum(z^2) - crossprod(1/sqrt(diagXtX + 1/psi)*crossprod(X, z))
+    SSR_psi = sum(z^2) - crossprod(1/sqrt(diagXtX + 1/psi)*Xtz)
     sigma_epsilon = 1/sqrt(rgamma(n = 1,
                                   shape = .001 + n/2,
                                   rate = .001 + SSR_psi/2))
+
     #----------------------------------------------------------------------------
     # Block 3: sample the regression coefficients
     Q_theta = 1/sigma_epsilon^2*diagXtX + 1/(sigma_epsilon^2*psi)
@@ -443,9 +476,15 @@ bsm_bc = function(y, x = NULL,
         skipcount = 0
       }
     }
-    if(verbose) computeTimeRemaining(nsi, timer0, nstot, nrep = 5000)
+    if(verbose) computeTimeRemaining(nsi, timer0, nstot)
   }
-  if(verbose) print(paste('Total time: ', round((proc.time()[3] - timer0)), 'seconds'))
+  # Summarize computing time:
+  if(verbose){
+    tfinal = proc.time()[3] - timer0
+    if(tfinal > 60){
+      print(paste('Total time:', round(tfinal/60,1), 'minutes'))
+    } else print(paste('Total time:', round(tfinal), 'seconds'))
+  }
 
   return(list(
     coefficients = colMeans(post_theta),
@@ -517,6 +556,9 @@ bsm_bc = function(y, x = NULL,
 #'   sin(2*pi*x) + sin(4*pi*x) + rnorm(n, sd = .5),
 #'              lambda = .5) # Signed square-root transformation
 #'
+#' # Package we use for fast computing w/ Gaussian processes:
+#' library(GpGp)
+#'
 #' # Fit a Bayesian Gaussian process with Box-Cox transformation:
 #' fit = bgp_bc(y = y, locs = x)
 #' names(fit) # what is returned
@@ -533,7 +575,7 @@ bsm_bc = function(y, x = NULL,
 #' lines(x, fitted(fit), lwd = 3)
 #' }
 #'
-#' @import GpGp fields
+# #' @import GpGp fields
 #' @export
 bgp_bc = function(y, locs,
                    X = NULL,
@@ -550,6 +592,22 @@ bgp_bc = function(y, locs,
 
   # For testing:
   # X = matrix(1, nrow = length(y)); covfun_name = "matern_isotropic"; locs_test = locs; X_test = X; nn = 30; sample_lambda  = FALSE; lambda = NULL; nsave = 1000; nburn = 1000; nskip = 0;
+
+  # Library required here:
+  if (!requireNamespace("GpGp", quietly = TRUE)) {
+    stop(
+      "Package \"GpGp\" must be installed to use this function.",
+      call. = FALSE
+    )
+  }
+
+  # Library required here:
+  if (!requireNamespace("fields", quietly = TRUE)) {
+    stop(
+      "Package \"fields\" must be installed to use this function.",
+      call. = FALSE
+    )
+  }
 
   # Data dimensions:
   n = length(y);
@@ -724,10 +782,10 @@ bgp_bc = function(y, locs,
         if(emp_bayes){
           ztilde = z_test + sigma_epsilon*rnorm(n = n_test)
         } else {
-          ztilde = cond_sim(fit = fit_gp,
-                            locs_pred = locs_test,
-                            X_pred = X_test,
-                            m = nn)
+          ztilde = GpGp::cond_sim(fit = fit_gp,
+                                  locs_pred = locs_test,
+                                  X_pred = X_test,
+                                  m = nn)
         }
         post_ypred[isave,] = g_inv_bc(ztilde, lambda = lambda)
 
@@ -757,7 +815,7 @@ bgp_bc = function(y, locs,
 #' A g-prior is assumed for the regression coefficients.
 #'
 #' @param y \code{n x 1} vector of observed counts
-#' @param X \code{n x p} matrix of predictors
+#' @param X \code{n x p} matrix of predictors (no intercept)
 #' @param tau the target quantile (between zero and one)
 #' @param X_test \code{n_test x p} matrix of predictors for test data;
 #' default is the observed covariates \code{X}
@@ -775,6 +833,7 @@ bgp_bc = function(y, locs,
 #' of the regression coefficients
 #' \item \code{post_ypred}: \code{nsave x n_test} samples
 #' from the posterior predictive distribution at test points \code{X_test}
+#' \item \code{post_qtau}: \code{nsave x n_test} samples of the \code{tau}th conditional quantile at test points \code{X_test}
 #' \item \code{model}: the model fit (here, \code{bqr})
 #' }
 #' as well as the arguments passed
@@ -784,6 +843,10 @@ bgp_bc = function(y, locs,
 #' quantile (\code{tau}). However, it is often a poor model for
 #' observed data, and the semiparametric version \code{\link{sbqr}} is
 #' recommended in general.
+#'
+#' @note An intercept is automatically added to \code{X} and
+#' \code{X_test}. The coefficients reported do *not* include
+#' this intercept parameter.
 #'
 #' @examples
 #' # Simulate some heteroskedastic data (no transformation):
@@ -811,7 +874,7 @@ bgp_bc = function(y, locs,
 #' # The posterior predictive checks usually do not pass!
 #' # try ?sbqr instead...
 #'
-#' @importFrom statmod rinvgauss
+# #' @importFrom statmod rinvgauss
 #' @export
 bqr = function(y, X, tau = 0.5,
                X_test = X,
@@ -824,23 +887,42 @@ bqr = function(y, X, tau = 0.5,
   # For testing:
   # tau = 0.5; psi = length(y); nsave = 1000; nburn = 1000; nskip = 0; verbose = TRUE
 
+  # Library required here:
+  if (!requireNamespace("statmod", quietly = TRUE)) {
+    stop(
+      "Package \"statmod\" must be installed to use this function.",
+      call. = FALSE
+    )
+  }
+
+  # Initial checks:
+  if(!is.matrix(X)) stop("X must be a matrix (rows = observations, columns = variables)")
+  if(!is.matrix(X_test)) stop("X_test must be a matrix (rows = observations, columns = variables)")
+  if(ncol(X) != ncol(X_test)) stop('X_test and X must have the same number of columns (variables)')
+  if(nrow(X) != length(y)) stop('the length of y must equal nrow(X)')
+
+  # Here: intercept is 1st column of X, X_test
+  #   (this is not part of the target parameter theta)
+  is_intercept = apply(X, 2, function(x) all(x == 1))
+  X = cbind(1, X[,!is_intercept])
+  is_intercept_test = apply(X_test, 2, function(x) all(x == 1))
+  X_test = cbind(1, X_test[,!is_intercept_test])
+
   # Data dimensions:
-  n = length(y); p = ncol(X)
+  n = length(y) # number of observations
+  p = ncol(X) - 1 # number of variables (excluding intercept)
+  n_test = nrow(X_test) # number of testing data points
 
-  # Testing data points:
-  if(!is.matrix(X_test)) X_test = matrix(X_test, nrow  = 1)
-  n_test = nrow(X_test)
-
-  # And some checks on columns:
+  # Requirement for the g-prior:
   if(p >= n) stop('The g-prior requires p < n')
-  if(p != ncol(X_test)) stop('X_test and X must have the same number of columns')
-
+  #----------------------------------------------------------------------------
   # Recurring terms:
-  y0 = sort(unique(y))
-  XtX = crossprod(X)
-
   a_tau = (1-2*tau)/(tau*(1-tau))
   b_tau = sqrt(2/(tau*(1-tau)))
+
+  # Key matrix quantities:
+  y0 = sort(unique(y))
+  XtX = crossprod(X)
   #----------------------------------------------------------------------------
   # Initialize the parameters:
 
@@ -849,7 +931,7 @@ bqr = function(y, X, tau = 0.5,
   #----------------------------------------------------------------------------
   # Store MCMC output:
   post_theta = array(NA, c(nsave, p))
-  post_ypred = array(NA, c(nsave, n_test))
+  post_ypred = post_qtau = array(NA, c(nsave, n_test))
 
   # Total number of MCMC simulations:
   nstot = nburn+(nskip+1)*(nsave)
@@ -861,9 +943,9 @@ bqr = function(y, X, tau = 0.5,
 
     #----------------------------------------------------------------------------
     # Block 1: parameter expansion
-    xi = 1/rinvgauss(n = n,
-                     mean = sqrt((2 + a_tau^2/b_tau^2)/((y - X%*%theta)^2/b_tau^2)),
-                     shape = 2 + a_tau^2/b_tau^2)
+    xi = 1/statmod::rinvgauss(n = n,
+                              mean = sqrt((2 + a_tau^2/b_tau^2)/((y - X%*%theta)^2/b_tau^2)),
+                              shape = 2 + a_tau^2/b_tau^2)
     # xi = sapply(1:n, function(i){
     #   rgig(n = 1,
     #        lambda = 0.5,
@@ -878,7 +960,7 @@ bqr = function(y, X, tau = 0.5,
     ch_Q = chol(Q_theta)
     theta = backsolve(ch_Q,
                       forwardsolve(t(ch_Q), ell_theta) +
-                        rnorm(p))
+                        rnorm(p + 1))
     #----------------------------------------------------------------------------
     # Block 3: sample the error SD
     # sigma_epsilon = 1/sqrt(rgamma(n = 1,
@@ -900,7 +982,10 @@ bqr = function(y, X, tau = 0.5,
         isave = isave + 1
 
         # Posterior samples of the model parameters:
-        post_theta[isave,] = theta
+        post_theta[isave,] = theta[-1]
+
+        # Quantile at the testing point:
+        post_qtau[nsi - nburn,] = X_test%*%theta
 
         # Predictive samples of ytilde:
         xi_test = rexp(n = n_test, rate = 1)
@@ -910,17 +995,294 @@ bqr = function(y, X, tau = 0.5,
         skipcount = 0
       }
     }
-    if(verbose) computeTimeRemaining(nsi, timer0, nstot, nrep = 5000)
+    if(verbose) computeTimeRemaining(nsi, timer0, nstot)
   }
-  if(verbose) print(paste('Total time: ', round((proc.time()[3] - timer0)), 'seconds'))
-
-  # Coefficients:
-  theta_hat = colMeans(post_theta)
+  # Summarize computing time:
+  if(verbose){
+    tfinal = proc.time()[3] - timer0
+    if(tfinal > 60){
+      print(paste('Total time:', round(tfinal/60,1), 'minutes'))
+    } else print(paste('Total time:', round(tfinal), 'seconds'))
+  }
 
   return(list(
-    coefficients = theta_hat,
-    fitted.values = X_test%*%theta_hat,
+    coefficients = colMeans(post_theta),
+    fitted.values = colMeans(post_qtau),
     post_theta = post_theta,
     post_ypred = post_ypred,
-    model = 'bqr', y = y, X = X, X_test = X_test, psi = psi, tau = tau))
+    post_qtau = post_qtau,
+    model = 'bqr', y = y, X = X[,-1], X_test = X_test[,-1], psi = psi, tau = tau))
+}
+#' Bayesian linear model with a Box-Cox transformation and a horseshoe prior
+#'
+#' MCMC sampling for Bayesian linear regression with 1) a
+#' (known or unknown) Box-Cox transformation and 2) a horseshoe prior for
+#' the (possibly high-dimensional) regression coefficients.
+#'
+#' @param y \code{n x 1} vector of observed counts
+#' @param X \code{n x p} matrix of predictors (no intercept)
+#' @param X_test \code{n_test x p} matrix of predictors for test data;
+#' default is the observed covariates \code{X}
+#' @param lambda Box-Cox transformation; if NULL, estimate this parameter
+#' @param sample_lambda logical; if TRUE, sample lambda, otherwise
+#' use the fixed value of lambda above or the MLE (if lambda unspecified)
+#' @param only_theta logical; if TRUE, only return posterior draws of the
+#' regression coefficients (for speed)
+#' @param nsave number of MCMC iterations to save
+#' @param nburn number of MCMC iterations to discard
+#' @param nskip number of MCMC iterations to skip between saving iterations,
+#' i.e., save every (nskip + 1)th draw
+#' @param verbose logical; if TRUE, print time remaining
+#' @return a list with the following elements:
+#' \itemize{
+#' \item \code{coefficients} the posterior mean of the regression coefficients
+#' \item \code{fitted.values} the posterior predictive mean at the test points \code{X_test}
+#' \item \code{post_theta}: \code{nsave x p} samples from the posterior distribution
+#' of the regression coefficients
+#' \item \code{post_ypred}: \code{nsave x n_test} samples
+#' from the posterior predictive distribution at test points \code{X_test}
+#' \item \code{post_g}: \code{nsave} posterior samples of the transformation
+#' evaluated at the unique \code{y} values
+#' \item \code{post_lambda}: \code{nsave} posterior samples of lambda
+#' \item \code{post_sigma}: \code{nsave} posterior samples of sigma
+#' \item \code{model}: the model fit (here, \code{blm_bc_hs})
+#' }
+#' as well as the arguments passed in.
+#'
+#' @details This function provides fully Bayesian inference for a
+#' transformed linear model via MCMC sampling. The transformation is
+#' parametric from the Box-Cox family, which has one parameter \code{lambda}.
+#' That parameter may be fixed in advanced or learned from the data.
+#'
+#' The horseshoe prior is especially useful for high-dimensional settings with
+#' many (possibly correlated) covariates. This function
+#' uses a fast Cholesky-forward/backward sampler when \code{p < n}
+#' and the Bhattacharya et al. (<https://doi.org/10.1093/biomet/asw042>) sampler
+#' when \code{p > n}. Thus, the sampler can scale linear in \code{n}
+#' (for fixed/small \code{p}) or linear in \code{p} (for fixed/small \code{n}).
+#'
+#' @note Box-Cox transformations may be useful in some cases, but
+#' in general we recommend the nonparametric transformation in \code{\link{sblm_hs}}.
+#'
+#' @note An intercept is automatically added to \code{X} and
+#' \code{X_test}. The coefficients reported do *not* include
+#' this intercept parameter, since it is not identified
+#' under more general transformation models (e.g., \code{\link{sblm_hs}}).
+#'
+#' @examples
+#' # Simulate data from a transformed (sparse) linear model:
+#' dat = simulate_tlm(n = 100, p = 50, g_type = 'step', prop_sig = 0.1)
+#' y = dat$y; X = dat$X # training data
+#'
+#' hist(y, breaks = 25) # marginal distribution
+#'
+#' # Fit the Bayesian linear model with a Box-Cox transformation & a horseshoe prior:
+#' fit = blm_bc_hs(y = y, X = X, verbose = FALSE)
+#' names(fit) # what is returned
+#'
+#' @export
+blm_bc_hs = function(y, X, X_test = X,
+                     lambda = NULL,
+                     sample_lambda = TRUE,
+                     only_theta = FALSE,
+                     nsave = 1000,
+                     nburn = 1000,
+                     nskip = 0,
+                     verbose = TRUE){
+
+  # For testing:
+  # X_test = X; sample_lambda  = FALSE; lambda = NULL; nsave = 1000; nburn = 1000; nskip = 0; verbose = TRUE
+
+  # Initial checks:
+  if(!is.matrix(X)) stop("X must be a matrix (rows = observations, columns = variables)")
+  if(!is.matrix(X_test)) stop("X_test must be a matrix (rows = observations, columns = variables)")
+  if(ncol(X) != ncol(X_test)) stop('X_test and X must have the same number of columns (variables)')
+  if(nrow(X) != length(y)) stop('the length of y must equal nrow(X)')
+
+  # Here: intercept is 1st column of X, X_test
+  #   (this is not part of the target parameter theta)
+  is_intercept = apply(X, 2, function(x) all(x == 1))
+  X = cbind(1, X[,!is_intercept])
+  is_intercept_test = apply(X_test, 2, function(x) all(x == 1))
+  X_test = cbind(1, X_test[,!is_intercept_test])
+
+  # Data dimensions:
+  n = length(y) # number of observations
+  p = ncol(X) - 1 # number of variables (excluding intercept)
+  n_test = nrow(X_test) # number of testing data points
+
+  # Here, we require that lambda is either input or sampled
+  if(is.null(lambda) & !sample_lambda) stop('If sample_lambda = FALSE, the user must input a value of lambda')
+
+  # Hyperparameters for Gamma(a_sigma, b_sigma) prior on error precision
+  a_sigma = b_sigma = 0.001
+  #----------------------------------------------------------------------------
+  # Recurring terms:
+  y0 = sort(unique(y))
+  XtX = crossprod(X)
+  #----------------------------------------------------------------------------
+  # Initialize the parameters:
+
+  # The scale is not well-identified for unknown lambda, so initialize at one
+  sigma_epsilon = 1
+
+  # Box-Cox parameter, if unspecified
+  if(is.null(lambda)) lambda = 0.5
+
+  # Latent data:
+  z = g_bc(y, lambda = lambda)
+  Xtz = crossprod(X, z) # only changes if sample_lambda = TRUE
+
+  # Coefficients:
+  if(p < n){
+    theta = chol2inv(chol(XtX))%*%Xtz
+  } else {
+    theta = sampleFastGaussian(Phi = X/sigma_epsilon,
+                               Ddiag = rep(100, p+1),
+                               alpha = z/sigma_epsilon)
+  }
+  # Horseshoe prior parameters:
+  #         theta_j ~ N(0, lambda_j^2)
+  #         lambda_j ~ C+(0, tau)
+  #         tau ~ C+(0,1)
+  # Local precision parameters: eta_lambda_j = 1/lambda_j^2
+  eta_lambda_j = c(10^-6, # flat prior for intercept
+                   1/square_stabilize(theta[-1]))
+  xi_lambda_j = rep(1, p)
+
+  # Global precision parameters: eta_tau = 1/tau^2
+  eta_tau = xi_tau = 1
+  #----------------------------------------------------------------------------
+  # Store MCMC output:
+  post_theta = array(NA, c(nsave, p))
+  if(only_theta){
+    post_ypred = post_g = post_lambda = post_sigma = NULL
+  } else {
+    post_ypred = array(NA, c(nsave, n_test))
+    post_g = array(NA, c(nsave, length(y0)))
+    post_lambda = post_sigma = rep(NA, nsave)
+  }
+
+  # Total number of MCMC simulations:
+  nstot = nburn+(nskip+1)*(nsave)
+  skipcount = 0; isave = 0 # For counting
+
+  # Run the MCMC:
+  if(verbose) timer0 = proc.time()[3] # For timing the sampler
+  for(nsi in 1:nstot){
+
+    #----------------------------------------------------------------------------
+    # Block 1: sample the transformation
+    if(sample_lambda){
+      # Sample lambda:
+      lambda = uni.slice(x0 = lambda,
+                         g = function(l_bc){
+                           # Likelihood for lambda:
+                           sum(dnorm(g_bc(y, lambda = l_bc),
+                                     mean = X%*%theta,
+                                     sd = sigma_epsilon, log = TRUE)) +
+                             # This is the prior on lambda, truncated to [0, 2]
+                             dnorm(l_bc, mean = 1/2, sd = 1/2, log = TRUE)
+                         },
+                         w = 1/2, m = 50, lower = 0, upper = 2)
+
+      # Update z:
+      z = g_bc(y, lambda = lambda)
+      Xtz = crossprod(X, z)
+    }
+    #----------------------------------------------------------------------------
+    # Recurring terms for Blocks 2-3
+    ch_Q = chol(XtX + diag(eta_lambda_j, p + 1))
+    fsolve_theta = forwardsolve(t(ch_Q), Xtz)
+
+    # Block 2: sample the error SD (unconditional on theta!)
+    SSR_hs = sum(z^2) - crossprod(Xtz, backsolve(ch_Q, fsolve_theta))
+    sigma_epsilon = 1/sqrt(rgamma(n = 1,
+                                  shape = a_sigma + n/2,
+                                  rate = b_sigma + SSR_hs/2))
+    #----------------------------------------------------------------------------
+    # Block 3: sample the regression coefficients
+    if(p >= n){
+      # Fast sampler for p >= n (BHATTACHARYA et al., 2016)
+      theta = sampleFastGaussian(Phi = X/sigma_epsilon,
+                                 Ddiag = sigma_epsilon^2/eta_lambda_j,
+                                 alpha = z/sigma_epsilon)
+    } else {
+      # Fast sampler for p < n (Rue, 2001)
+      theta = backsolve(ch_Q/sigma_epsilon,
+                        fsolve_theta/sigma_epsilon + rnorm(p+1))
+
+      # Previously:
+      # ch_Q = 1/sigma_epsilon*chol(XtX + diag(eta_lambda_j, p+1))
+      # ell_theta = 1/sigma_epsilon^2*crossprod(X, z)
+      # theta = backsolve(ch_Q, forwardsolve(t(ch_Q), ell_theta) + rnorm(p+1))
+    }
+    #----------------------------------------------------------------------------
+    # Block 4: sample the horseshoe prior variance parameters
+
+    # Precision parameters & parameter expansions (local):
+    eta_lambda_j[-1] = rgamma(n = p,
+                              shape = 1,
+                              rate = xi_lambda_j + square_stabilize(theta[-1]/sigma_epsilon)/2
+    )
+    xi_lambda_j = rgamma(n = p,
+                         shape = 1,
+                         rate = eta_lambda_j[-1] + eta_tau)
+
+    # Precision parameters & parameter expansions (global):
+    eta_tau = rgamma(n = 1,
+                     shape = p/2 + 1/2,
+                     rate = sum(xi_lambda_j) + xi_tau)
+    xi_tau = rgamma(n = 1,
+                    shape = 1,
+                    rate = eta_tau + 1)
+    #----------------------------------------------------------------------------
+    # Store the MCMC:
+    if(nsi > nburn){
+
+      # Increment the skip counter:
+      skipcount = skipcount + 1
+
+      # Save the iteration:
+      if(skipcount > nskip){
+        # Increment the save index
+        isave = isave + 1
+
+        # Posterior samples of the model parameters:
+        post_theta[isave,] = theta[-1]
+
+        if(!only_theta){
+          # Predictive samples of ytilde:
+          ztilde = X_test%*%theta + sigma_epsilon*rnorm(n = n_test)
+          post_ypred[isave,] = g_inv_bc(ztilde, lambda = lambda)
+
+          # Posterior samples of the transformation:
+          post_g[isave,] = g_bc(y0, lambda = lambda)
+          post_lambda[isave] = lambda
+
+          # Posterior samples of the error SD:
+          post_sigma[isave] = sigma_epsilon
+        }
+
+        # And reset the skip counter:
+        skipcount = 0
+      }
+    }
+    if(verbose) computeTimeRemaining(nsi, timer0, nstot)
+  }
+  # Summarize computing time:
+  if(verbose){
+    tfinal = proc.time()[3] - timer0
+    if(tfinal > 60){
+      print(paste('Total time:', round(tfinal/60,1), 'minutes'))
+    } else print(paste('Total time:', round(tfinal), 'seconds'))
+  }
+
+  return(list(
+    coefficients = colMeans(post_theta),
+    fitted.values = ifelse(only_theta, NA, colMeans(post_ypred)),
+    post_theta = post_theta,
+    post_ypred = post_ypred,
+    post_g = post_g, post_lambda = post_lambda, post_sigma = post_sigma,
+    model = 'blm_bc_hs', y = y, X = X[,-1], X_test = X_test[,-1], sample_lambda = sample_lambda, only_theta = only_theta))
 }

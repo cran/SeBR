@@ -1,4 +1,4 @@
-## ---- include = FALSE---------------------------------------------------------
+## ----include = FALSE----------------------------------------------------------
 knitr::opts_chunk$set(
   collapse = TRUE,
   comment = "#>",
@@ -72,10 +72,8 @@ temp = sapply(1:nrow(fit$post_g), function(s)
 # Add the posterior mean of g:
 lines(y0, colMeans(fit$post_g), lwd = 3) # posterior mean
 
-# Add the true transformation, rescaled for easier comparisons:
-lines(y, 
-      scale(dat$g_true)*sd(colMeans(fit$post_g)) + mean(colMeans(fit$post_g)), 
-      type='p', pch=2)
+# Add the true transformation:
+lines(y, dat$g_true, type='p', pch=2) # true transformation
 
 legend('bottomright', c('Truth'), pch = 2) # annotate the true transformation
 
@@ -87,8 +85,7 @@ legend('bottomright', c('Truth'), pch = 2) # annotate the true transformation
 coef(fit)
 
 # Check: correlation with true coefficients
-cor(dat$beta_true[-1],
-    coef(fit)[-1]) # excluding the intercept
+cor(dat$beta_true, coef(fit))
 
 # 95% credible intervals:
 theta_ci = t(apply(fit$post_theta, 2, quantile, c(.025, 0.975)))
@@ -110,7 +107,12 @@ y = dat$y; X = dat$X
 # Testing data:
 y_test = dat$y_test; X_test = dat$X_test 
 
+## ----pack-qr, message = FALSE, warning = FALSE--------------------------------
+library(quantreg) # traditional QR for initialization
+library(statmod) # for rinvgauss sampling
+
 ## ----fit-qr-------------------------------------------------------------------
+
 # Quantile to target:
 tau = 0.05
 
@@ -209,6 +211,10 @@ plot(x_test, y_test,
      main = "Training (gray) and testing (black) data")
 lines(x, y, type='p', col='gray', pch = 2)
 
+## ----pack-gp, message = FALSE, warning = FALSE--------------------------------
+library(GpGp) # fast GP computing
+library(fields) # accompanies GpGp
+
 ## ----fit-bc-------------------------------------------------------------------
 # Fit the Box-Cox Gaussian process model:
 fit_bc = bgp_bc(y = y, 
@@ -240,6 +246,9 @@ lines(x_test, y_test, type='p') # actual values
 lines(x_test, y_hat_bc, lwd = 3) # fitted values
 
 ## ----fit-gp-------------------------------------------------------------------
+
+# library(GpGp) # loaded above
+
 # Fit the semiparametric Gaussian process model:
 fit = sbgp(y = y, 
            locs = x,
